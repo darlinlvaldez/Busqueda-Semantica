@@ -1,0 +1,373 @@
+
+# **Proyecto Final: Sistema de Búsqueda Semántica para Artículos Científicos.**
+
+
+### **Descargar dependencias necesarias y configurar el acceso a la API de Kaggle en el entorno.**
+
+```bash
+!pip install langchain gensim transformers scikit-learn matplotlib seaborn kaggle
+```
+
+```bash
+# Subir el archivo.json descargado desde kaggle.
+
+from google.colab import files
+files.upload()
+```
+
+```bash
+
+# Crear el directorio .kaggle si no existe.
+
+!mkdir -p ~/.kaggle
+
+
+### Mover kaggle.json al directorio .kaggle.
+
+!cp kaggle.json ~/.kaggle/
+
+
+#Configurar permisos para que solo el usuario pueda leer y escribir el archivo.
+
+!chmod 600 ~/.kaggle/kaggle.json
+```
+
+### Descargar el dataset de arXiv desde Kaggle.
+
+```bash
+!kaggle datasets download -d Cornell-University/arxiv
+```
+
+### Descomprimir el archivo descargado.
+
+```bash
+!unzip arxiv.zip -d arxiv_data
+```
+
+### **Procesar y limpiar grandes volúmenes de datos de texto.**
+
+```bash
+import json
+import pandas as pd
+import re
+
+def process_large_json(file_path, max_lines=10000):
+    # Leer el archivo en partes
+    with open(file_path, 'r') as f:
+        lines = f.readlines(max_lines)
+
+    # Convertir cada línea a un diccionario y crear un DataFrame
+    json_objects = []
+    for line in lines:
+        try:
+            json_objects.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue  # Si ocurre un error en la decodificación, lo ignora
+
+    # Convertir a DataFrame
+    if json_objects:
+        df = pd.json_normalize(json_objects)
+        return df
+    else:
+        return pd.DataFrame()
+
+def clean_text(text):
+    text = re.sub(r'\s+', ' ', text)  # Eliminar espacios extra
+    text = text.lower()  # Convertir a minúsculas
+    return text
+
+# Procesar el archivo en partes
+data_chunk = process_large_json('arxiv_data/arxiv-metadata-oai-snapshot.json') # Make sure data_chunk is defined in this cell
+print(f"Number of records in data_chunk: {len(data_chunk)}")
+print(data_chunk.head())
+
+# Apply the cleaning function
+data_chunk['cleaned_abstract'] = data_chunk['abstract'].apply(clean_text)
+```
+
+
+### **Implementar un sistema de búsqueda semántica utilizando embeddings.**
+
+
+```bash
+# Generar embeddings de texto utilizando el modelo BERT de transformers.
+
+from transformers import BertTokenizer, BertModel
+import torch
+
+model_name = 'bert-base-uncased'
+tokenizer = BertTokenizer.from_pretrained(model_name)
+model = BertModel.from_pretrained(model_name)
+
+def get_embeddings(text):
+    inputs = tokenizer(text, return_tensors='pt', truncation=True, padding=True)
+    outputs = model(**inputs)
+    embeddings = outputs.last_hidden_state.mean(dim=1)  # Usar la última capa
+    return embeddings.detach().numpy()
+
+# Generar embeddings para el dataframe
+data_chunk['embeddings'] = data_chunk['cleaned_abstract'].apply(lambda x: get_embeddings(x)[0])
+print(data_chunk['embeddings'].head())
+```
+
+
+### **Generación y Validación de Embeddings de Texto Usando BERT y Evaluación de Resultados en un Sistema de Búsqueda Semántica.**
+
+
+```bash
+### #Verificar los Embeddings.
+
+import json
+import pandas as pd
+import re
+import numpy as np
+
+# Aplicar la función de limpieza.
+data_chunk['cleaned_abstract'] = data_chunk['abstract'].apply(clean_text)
+
+from transformers import BertTokenizer, BertModel
+import torch
+
+model_name = 'bert-base-uncased'
+tokenizer = BertTokenizer.from_pretrained(model_name)
+model = BertModel.from_pretrained(model_name)
+
+def get_embeddings(text):
+    inputs = tokenizer(text, return_tensors='pt', truncation=True, padding=True)
+    outputs = model(**inputs)
+    embeddings = outputs.last_hidden_state.mean(dim=1)  # Usar la última capa
+    return embeddings.detach().numpy()
+
+data_chunk['embeddings'] = data_chunk['cleaned_abstract'].apply(lambda x: get_embeddings(x)[0])
+
+# Comprobar si hay incrustaciones
+print(data_chunk['embeddings'].apply(lambda x: len(x)).unique())
+print(data_chunk['embeddings'].apply(lambda x: not np.any(np.isnan(x)) and np.all(np.isfinite(x))).all()) # Ahora puedes usar np
+```
+
+```bash
+# Revisar los Datos de Entrada
+print(f"Number of valid embeddings: {data_chunk['embeddings'].apply(lambda x: len(x)).sum()}")
+```
+
+```bash
+# Confirmar la Dimensionalidad
+print(f"Dimensionality of embeddings: {len(data_chunk['embeddings'].iloc[0])}")
+```
+
+
+### **Definir las funciones de métrica**
+
+```bash
+import numpy as np
+
+def calculate_precision_recall_f1(y_true, y_pred):
+    true_set = set(y_true)
+    pred_set = set(y_pred)
+
+    tp = len(true_set & pred_set)  # True Positives
+    fp = len(pred_set - true_set)  # False Positives
+    fn = len(true_set - pred_set)  # False Negatives
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+
+    return precision, recall, f1
+
+```
+
+
+### **Evaluar el sistema de búsqueda.**
+
+```bash
+queries = ["deep learning", "neural networks", "machine learning"]
+true_relevant_articles = [
+    [1, 2, 3],  # Artículos relevantes para "deep learning"
+    [4, 5, 6],  # Artículos relevantes para "neural networks"
+    [7, 8, 9]   # Artículos relevantes para "machine learning"
+]
+
+retrieved_articles = [
+    [1, 3, 5],  # Artículos recuperados para "deep learning"
+    [4, 7, 6],  # Artículos recuperados para "neural networks"
+    [7, 2, 9]   # Artículos recuperados para "machine learning"
+]
+
+precision_list, recall_list, f1_list = [], [], []
+for true_relevant, retrieved in zip(true_relevant_articles, retrieved_articles):
+    precision, recall, f1 = calculate_precision_recall_f1(true_relevant, retrieved)
+    precision_list.append(precision)
+    recall_list.append(recall)
+    f1_list.append(f1)
+
+print(f"Average Precision: {np.mean(precision_list)}")
+print(f"Average Recall: {np.mean(recall_list)}")
+print(f"Average F1-Score: {np.mean(f1_list)}")
+```
+
+### **Desarrollar una función para la búsqueda y visualización de resultados.**
+
+```bash
+def diagnose_visualization(data, query, results):
+    if len(data) < 2:
+        print("Not enough data to perform PCA. Try processing more data.")
+        return
+
+    pca = PCA(n_components=2)
+    embeddings_list = list(data['embeddings'])
+
+    # Definir las funciones check_embeddings_format y check_embeddings_values
+    def check_embeddings_format(embeddings):
+        problems = []
+        for i, emb in enumerate(embeddings):
+            if not isinstance(emb, np.ndarray):
+                problems.append(i)
+        return problems
+
+    def check_embeddings_values(embeddings): # Aligned with check_embeddings_format
+        problems = []
+        for i, emb in enumerate(embeddings):
+            if np.any(np.isnan(emb)) or not np.all(np.isfinite(emb)):
+                problems.append(i)
+        return problems
+
+    # Verificar que las embeddings estén en el formato correcto
+    format_problems = check_embeddings_format(embeddings_list)
+    value_problems = check_embeddings_values(embeddings_list)
+    all_problems = set(format_problems).union(set(value_problems))
+
+    print(f"Format problems: {format_problems}")
+    print(f"Value problems: {value_problems}")
+
+    try:
+        embeddings_2d = pca.fit_transform(embeddings_list)
+        print(f"Shape of embeddings_2d: {embeddings_2d.shape}")
+    except ValueError as e:
+        print(f"Error during PCA transformation: {e}")
+        return
+
+    print(f"First 5 PCA components:\n{embeddings_2d[:5]}")
+
+    plt.figure(figsize=(10, 7))
+
+    # Puntos válidos
+    valid_indices = [i for i in range(len(embeddings_list)) if i not in all_problems]
+    sns.scatterplot(x=embeddings_2d[valid_indices, 0], y=embeddings_2d[valid_indices, 1], label='Data Points', color='blue')
+
+    # Puntos problemáticos
+    if all_problems:
+        problem_embeddings_2d = pca.transform([embeddings_list[i] for i in all_problems])
+        plt.scatter(problem_embeddings_2d[:, 0], problem_embeddings_2d[:, 1], color='red', marker='x', s=100, label='Problematic Points')
+
+    # Agregar el embedding de la consulta
+    query_embedding = pca.transform([get_embeddings(query)[0]])[0]
+    plt.scatter(query_embedding[0], query_embedding[1], color='red', marker='x', s=200, label='Query')
+
+    # Agregar las etiquetas para los resultados
+    for idx, result in results.iterrows():
+        result_embedding = pca.transform([result['embeddings']])[0]
+        plt.text(result_embedding[0], result_embedding[1], result['title'], fontsize=9)
+
+    plt.xlabel('PCA Component 1')
+    plt.ylabel('PCA Component 2')
+    plt.title('PCA of Embeddings')
+    plt.legend()
+    plt.show()
+
+# Ejecutar diagnóstico
+query = "deep learning"
+results = data_chunk.head()  # Ajusta esto según sea necesario
+diagnose_visualization(data_chunk, query, results)
+```
+
+
+###**Visualización de Embeddings en 3D con PCA para Artículos Científicos**
+
+```bash
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.decomposition import PCA
+from mpl_toolkits.mplot3d import Axes3D
+from transformers import BertTokenizer, BertModel
+import torch
+
+# Cargar el modelo BERT
+model_name = 'bert-base-uncased'
+tokenizer = BertTokenizer.from_pretrained(model_name)
+model = BertModel.from_pretrained(model_name)
+
+def get_embeddings(text):
+    inputs = tokenizer(text, return_tensors='pt', truncation=True, padding=True)
+    outputs = model(**inputs)
+    embeddings = outputs.last_hidden_state.mean(dim=1)
+    return embeddings.detach().numpy()
+
+# Cargar y procesar los datos
+def process_large_json(file_path, max_lines=10000):
+    with open(file_path, 'r') as f:
+        lines = f.readlines(max_lines)
+    json_objects = []
+    for line in lines:
+        try:
+            json_objects.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    if json_objects:
+        df = pd.json_normalize(json_objects)
+        return df
+    else:
+        return pd.DataFrame()
+
+def clean_text(text):
+    text = re.sub(r'\s+', ' ', text)
+    text = text.lower()
+    return text
+
+# Ejemplo de uso
+data_chunk = process_large_json('arxiv_data/arxiv-metadata-oai-snapshot.json')
+data_chunk['cleaned_abstract'] = data_chunk['abstract'].apply(clean_text)
+data_chunk['embeddings'] = data_chunk['cleaned_abstract'].apply(lambda x: get_embeddings(x)[0])
+
+def visualize_embeddings_3d(data, query, results):
+    if len(data) < 2:
+        print("Not enough data to perform PCA. Try processing more data.")
+        return
+
+    pca = PCA(n_components=3)
+    embeddings_list = list(data['embeddings'])
+
+    # Verificar que las embeddings estén en el formato correcto
+    embeddings_3d = pca.fit_transform(embeddings_list)
+
+    # Crear la figura y el eje 3D
+    fig = plt.figure(figsize=(12, 10))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Puntos válidos
+    ax.scatter(embeddings_3d[:, 0], embeddings_3d[:, 1], embeddings_3d[:, 2], label='Data Points', c='blue')
+
+    # Agregar el embedding de la consulta
+    query_embedding = pca.transform([get_embeddings(query)[0]])[0]
+    ax.scatter(query_embedding[0], query_embedding[1], query_embedding[2], color='red', marker='x', s=200, label='Query')
+
+    # Agregar las etiquetas para los resultados
+    for idx, result in results.iterrows():
+        result_embedding = pca.transform([result['embeddings']])[0]
+        ax.text(result_embedding[0], result_embedding[1], result_embedding[2], result['title'], fontsize=9)
+
+    ax.set_xlabel('PCA Component 1')
+    ax.set_ylabel('PCA Component 2')
+    ax.set_zlabel('PCA Component 3')
+    ax.set_title('PCA of Embeddings in 3D')
+    ax.legend()
+    plt.show()
+
+# Ejemplo de visualización en 3D
+query = "deep learning"
+results = data_chunk.head()  # Ajusta esto según sea necesario
+visualize_embeddings_3d(data_chunk, query, results)
+```
